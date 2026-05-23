@@ -1,0 +1,13 @@
+{
+  "name": "MediPharma LLM",
+  "description": "AI-powered medicine identifier and health assistant. Identify medicine from photos, find dosages, check disease-specific medications, and explore brand alternatives.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "Image Identification",
+    "Medical Information",
+    "Drug Alternatives",
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
