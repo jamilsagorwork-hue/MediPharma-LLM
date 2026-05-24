@@ -35,9 +35,16 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
+const FALLBACK_MODELS: Record<string, string[]> = {
+  "gemini-3.5-flash": ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"],
+  "gemini-3.1-flash-lite": ["gemini-3.1-flash-lite", "gemini-flash-latest"],
+  "gemini-flash-latest": ["gemini-flash-latest", "gemini-3.1-flash-lite"]
+};
+
 /**
  * Executes a Gemini API call with automatic retries for transient errors (e.g. 503 UNAVAILABLE, 429 rate limit).
  * Utilizes exponential backoff to handle temporary Service Unavailable states gracefully.
+ * Cascades to highly available alternative models (e.g., gemini-3.1-flash-lite, gemini-flash-latest) if the primary model is overwhelmed.
  */
 async function generateContentWithRetry(
   params: {
@@ -45,21 +52,26 @@ async function generateContentWithRetry(
     contents: any;
     config?: any;
   },
-  maxRetries = 2,
-  initialDelayMs = 2000
+  maxRetries = 3,
+  initialDelayMs = 1500
 ) {
-  const modelName = params.model || "gemini-3.5-flash";
+  const originalModel = params.model || "gemini-3.5-flash";
+  const modelChain = FALLBACK_MODELS[originalModel] || [originalModel];
   let delayMs = initialDelayMs;
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    // Select model for current attempt. Fall back sequentially or stick to the last one if we exceed the chain
+    const currentModel = modelChain[Math.min(attempt - 1, modelChain.length - 1)];
+
     try {
       const ai = getGeminiClient();
+      console.log(`[Gemini API] Attempt ${attempt}: calling generateContent with model ${currentModel}`);
       return await ai.models.generateContent({
         ...params,
-        model: modelName,
+        model: currentModel,
       });
     } catch (error: any) {
-      console.warn(`[Gemini API Attempt ${attempt} / ${maxRetries + 1} failed]:`, error?.message || error);
+      console.warn(`[Gemini API Attempt ${attempt} / ${maxRetries + 1} failed with model ${currentModel}]:`, error?.message || error);
       
       const errorStr = String(error?.message || error || "").toUpperCase();
       const isTransient = 
@@ -67,6 +79,7 @@ async function generateContentWithRetry(
         errorStr.includes("UNAVAILABLE") ||
         errorStr.includes("LIMIT") || 
         errorStr.includes("429") ||
+        errorStr.includes("HIGH DEMAND") ||
         error?.status === 503 ||
         error?.status === 429;
 
@@ -74,9 +87,9 @@ async function generateContentWithRetry(
         throw error;
       }
 
-      console.log(`Retrying in ${delayMs}ms due to transient error...`);
+      console.log(`Retrying in ${delayMs}ms using model fallback chain from ${currentModel}...`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
-      delayMs *= 1.5; // exponential backoff
+      delayMs *= 2.0; // exponential backoff
     }
   }
   throw new Error("Content generation failed after retries.");
@@ -264,4 +277,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
