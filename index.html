@@ -4,6 +4,30 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MediPharma LLM</title>
+    <script>
+      // Gracefully capture and filter benign, environment-specific HMR WebSocket disconnect alerts
+      window.addEventListener('unhandledrejection', function(event) {
+        if (event.reason && (
+          String(event.reason).includes('WebSocket') ||
+          String(event.reason.message || '').includes('WebSocket') ||
+          String(event.reason).includes('vite') ||
+          String(event.reason).includes('ws://')
+        )) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }, true);
+      window.addEventListener('error', function(event) {
+        if (event.message && (
+          String(event.message).includes('WebSocket') ||
+          String(event.message).includes('vite') ||
+          String(event.message).includes('ws://')
+        )) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }, true);
+    </script>
   </head>
   <body>
     <div id="root"></div>

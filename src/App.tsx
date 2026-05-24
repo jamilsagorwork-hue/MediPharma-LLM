@@ -41,6 +41,18 @@ import {
   PillColorOption,
   DosingMedication
 } from './data/medicineData';
+import {
+  saveHistoryLogToSupabase,
+  fetchHistoryLogsFromSupabase,
+  fetchMedicinesFromSupabase,
+  getSupabaseClient,
+  signInWithGoogle,
+  signUpWithEmail,
+  signInWithEmail,
+  signOutUser,
+  getActiveUserEmail
+} from './services/supabaseService';
+
 
 type Mode = 'identify' | 'disease' | 'generic' | 'dosing' | 'history';
 
@@ -60,6 +72,19 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [medicines, setMedicines] = useState<DosingMedication[]>(CLINICAL_DOSING_DATABASE);
+  const [isDbSynced, setIsDbSynced] = useState(false);
+
+  // Authentication states
+  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authSuccessMessage, setAuthSuccessMessage] = useState<string | null>(null);
+
   
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [identifySubMode, setIdentifySubMode] = useState<'visual' | 'text'>('visual');
@@ -87,22 +112,130 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Load history on mount
+  // Listen to Supabase Auth State changes
   useEffect(() => {
-    const saved = localStorage.getItem('pharmai_history');
-    if (saved) {
-      try {
-        setHistory(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to load history", e);
+    async function checkCurrentAuth() {
+      const email = await getActiveUserEmail();
+      if (email) {
+        setCurrentUserEmail(email);
       }
     }
+    checkCurrentAuth();
   }, []);
+
+  // Fetch medicines and user-specific history logs on email changes or mount
+  useEffect(() => {
+    async function loadDatabaseAndHistory() {
+      // 1. Initial Local Storage load
+      const saved = localStorage.getItem('pharmai_history');
+      if (saved) {
+        try {
+          if (!currentUserEmail) {
+            setHistory(JSON.parse(saved));
+          }
+        } catch (e) {
+          console.error("Failed to load local history", e);
+        }
+      }
+
+      // 2. Check if Supabase contains active keys
+      const hasSupabase = getSupabaseClient();
+      if (hasSupabase) {
+        setIsDbSynced(true);
+        try {
+          // Fetch synced medicines list
+          const cloudMeds = await fetchMedicinesFromSupabase();
+          setMedicines(cloudMeds);
+
+          // Fetch synced audit logs for the current user
+          const cloudLogs = await fetchHistoryLogsFromSupabase(currentUserEmail || undefined);
+          if (cloudLogs && cloudLogs.length > 0) {
+            if (currentUserEmail) {
+              setHistory(cloudLogs);
+            } else {
+              setHistory(prev => {
+                const uniqueMap = new Map();
+                prev.forEach(item => uniqueMap.set(item.type + item.query, item));
+                cloudLogs.forEach(item => uniqueMap.set(item.type + item.query, item));
+                return Array.from(uniqueMap.values())
+                  .sort((a, b) => b.timestamp - a.timestamp)
+                  .slice(0, 50);
+              });
+            }
+          } else if (currentUserEmail) {
+            // If user is logged in but has no cloud logs, clear history since it's user-specific
+            setHistory([]);
+          }
+        } catch (error) {
+          console.error("[Supabase Service] Failed during dynamic data synchronization:", error);
+        }
+      }
+    }
+    loadDatabaseAndHistory();
+  }, [currentUserEmail]);
 
   // Save history on change
   useEffect(() => {
     localStorage.setItem('pharmai_history', JSON.stringify(history));
   }, [history]);
+
+  // Authentication Handlers
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError(null);
+    setAuthSuccessMessage(null);
+    try {
+      if (authMode === 'register') {
+        await signUpWithEmail(authEmail, authPassword);
+        setAuthSuccessMessage("Account successfully registered! You can now sign in.");
+        setAuthMode('login');
+      } else {
+        await signInWithEmail(authEmail, authPassword);
+        setCurrentUserEmail(authEmail);
+        setAuthSuccessMessage("Welcome back! Signed in successfully.");
+        // Clear passwords and close popup
+        setAuthPassword('');
+        setTimeout(() => {
+          setShowAuthModal(false);
+          setAuthSuccessMessage(null);
+        }, 1200);
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || "Authentication credentials refused.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleGoogleAuth = async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const result = await signInWithGoogle();
+      if (result?.user?.email) {
+        setCurrentUserEmail(result.user.email);
+        setAuthSuccessMessage(`Signed in as ${result.user.email}`);
+        setTimeout(() => {
+          setShowAuthModal(false);
+          setAuthSuccessMessage(null);
+        }, 1200);
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || "Google Single Sign-On link failed.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOutUser();
+      setCurrentUserEmail(null);
+    } catch (err: any) {
+      console.error("Sign out process failed:", err);
+    }
+  };
 
   // Synchronize dynamic visual pill descriptors to textDescription
   useEffect(() => {
@@ -140,6 +273,11 @@ export default function App() {
       timestamp: Date.now(),
     };
     setHistory(prev => [newItem, ...prev].slice(0, 50));
+
+    // Asynchronously write audit logs to Supabase backend in the background
+    saveHistoryLogToSupabase(type, q, res, currentUserEmail || undefined).catch(err => {
+      console.warn("[Supabase Service] Failed background sync:", err);
+    });
   };
 
   const deleteHistoryItem = (id: string, e: React.MouseEvent) => {
@@ -298,7 +436,7 @@ export default function App() {
   };
 
   // Rx Scheduler & Compliance Calculators
-  const selectedMed = CLINICAL_DOSING_DATABASE.find(m => m.id === selectedDoseDrugId) || CLINICAL_DOSING_DATABASE[0];
+  const selectedMed = medicines.find(m => m.id === selectedDoseDrugId) || medicines[0];
   
   const getCalculatedDose = () => {
     const isWeightDriven = patientAgeGroup === 'pediatric' && selectedMed.pediatricDosePerKg > 0;
@@ -395,7 +533,7 @@ export default function App() {
             ))}
           </nav>
 
-          {/* Secure Status Badge */}
+          {/* Secure Status Badge & Authenticated User Actions */}
           <div className="flex items-center gap-3">
             {/* Real ECG Heatbeat visualization */}
             <div className="hidden lg:flex items-center gap-2 pr-2 border-r border-emerald-950/40">
@@ -404,10 +542,50 @@ export default function App() {
                 <path d="M0 10 H20 L23 2 L26 18 L29 10 H60" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </div>
+            
             <div className="px-3.5 py-1.5 bg-emerald-950/50 border border-emerald-800/30 rounded-full text-[9px] font-bold tracking-[0.15em] uppercase text-emerald-400 flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
               HIPAA SECURE
             </div>
+
+            {isDbSynced && (
+              <div className="hidden sm:flex px-3 py-1 bg-emerald-950/40 border border-emerald-500/20 text-emerald-400 rounded-full text-[9px] font-mono tracking-wider items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                SUPABASE SYNCED
+              </div>
+            )}
+
+            {/* Authentication user tag or login trigger */}
+            {currentUserEmail ? (
+              <div className="flex items-center gap-2">
+                <div 
+                  title={currentUserEmail}
+                  className="px-3 py-1.5 bg-zinc-950 border border-emerald-950 text-[10px] font-mono text-emerald-400 rounded-lg max-w-[140px] sm:max-w-[180px] truncate flex items-center gap-1.5"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                  {currentUserEmail}
+                </div>
+                <button
+                  onClick={handleSignOut}
+                  className="px-2.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-zinc-800/60 rounded-lg text-zinc-400 hover:text-white text-[9px] uppercase tracking-wider font-mono font-bold transition-all transition-colors"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError(null);
+                  setAuthSuccessMessage(null);
+                  setShowAuthModal(true);
+                }}
+                className="px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-[10px] uppercase font-mono tracking-widest font-extrabold rounded-lg shadow-[0_0_15px_rgba(16,185,129,0.25)] transition-all flex items-center gap-1.5 cursor-pointer"
+              >
+                <User className="w-3.5 h-3.5 shrink-0" />
+                <span>SIGN IN</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -820,7 +998,7 @@ export default function App() {
                         }}
                         className="w-full bg-neutral-950 border border-emerald-950 text-sm text-white rounded-lg p-3 outline-none focus:border-emerald-500 transition-colors font-medium cursor-pointer"
                       >
-                        {CLINICAL_DOSING_DATABASE.map((drug) => (
+                        {medicines.map((drug) => (
                           <option key={drug.id} value={drug.id}>
                             {drug.name} ({drug.genericName})
                           </option>
@@ -1337,6 +1515,139 @@ export default function App() {
            </div>
         </div>
       </footer>
+
+      {/* Clinician Authentication Modal Portal */}
+      <AnimatePresence>
+        {showAuthModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAuthModal(false)}
+              className="absolute inset-0 bg-[#060808]/85 backdrop-blur-md"
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-[#0b0e0d] border border-emerald-950 rounded-3xl p-6 sm:p-8 w-full max-w-md relative z-10 shadow-[0_0_50px_rgba(16,185,129,0.08)] overflow-hidden"
+            >
+              {/* Subtle background glow */}
+              <div className="absolute -top-24 -left-24 w-48 h-48 bg-emerald-500/[0.03] blur-3xl rounded-full pointer-events-none"></div>
+
+              <div className="flex justify-between items-start mb-6">
+                <div>
+                  <span className="text-[9px] font-mono tracking-[0.2em] uppercase text-emerald-500 block mb-1">AuraPharma Systems</span>
+                  <h3 className="text-xl font-serif text-white italic">
+                    {authMode === 'login' ? 'Clinician Access Hub' : 'Register Clinical Profile'}
+                  </h3>
+                </div>
+                <button 
+                  onClick={() => setShowAuthModal(false)}
+                  className="p-1 px-2.5 rounded-lg border border-emerald-950 hover:bg-emerald-950/40 text-neutral-500 hover:text-white transition-all text-xs font-mono"
+                >
+                  ESC
+                </button>
+              </div>
+
+              {/* Status Indications */}
+              {authError && (
+                <div className="bg-red-950/25 border border-red-900/40 p-3 rounded-lg mb-4 text-xs text-red-400 font-mono">
+                  {authError}
+                </div>
+              )}
+              {authSuccessMessage && (
+                <div className="bg-emerald-950/30 border border-emerald-900/40 p-3 rounded-lg mb-4 text-xs text-emerald-400 font-mono">
+                  {authSuccessMessage}
+                </div>
+              )}
+
+              {/* Gmail / Google Single Sign-on */}
+              <button
+                type="button"
+                onClick={handleGoogleAuth}
+                disabled={authLoading}
+                className="w-full bg-white hover:bg-neutral-100 text-black font-extrabold text-[11px] uppercase tracking-wider py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer disabled:opacity-50"
+              >
+                {/* Visual SVG Google Icon */}
+                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FBBC05" />
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                </svg>
+                Continue with Gmail / Google
+              </button>
+
+              <div className="flex items-center gap-3 my-5">
+                <div className="h-px bg-emerald-950/60 flex-1"></div>
+                <span className="text-[9px] font-mono uppercase tracking-widest text-[#2c3d39]">Or Email credentials</span>
+                <div className="h-px bg-emerald-950/60 flex-1"></div>
+              </div>
+
+              {/* Standard Email Auth Form */}
+              <form onSubmit={handleEmailAuth} className="space-y-4">
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider text-zinc-500 font-mono font-bold mb-1.5">Email Address</label>
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="email@aurapharma.org"
+                    className="w-full bg-neutral-950 border border-emerald-950/60 rounded-xl p-3 text-xs text-white placeholder-emerald-950 focus:border-emerald-500 focus:ring-0 outline-none font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] uppercase tracking-wider text-zinc-500 font-mono font-bold mb-1.5">Secure Password</label>
+                  <input
+                    type="password"
+                    required
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full bg-neutral-950 border border-emerald-950/60 rounded-xl p-3 text-xs text-white placeholder-emerald-950 focus:border-emerald-500 focus:ring-0 outline-none font-mono"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full bg-emerald-950 hover:bg-emerald-900 border border-emerald-800 text-emerald-400 font-mono font-extrabold text-[10px] uppercase tracking-widest py-3 rounded-xl transition-all cursor-pointer mt-2 flex items-center justify-center gap-2"
+                >
+                  {authLoading ? (
+                    <span className="w-3.5 h-3.5 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></span>
+                  ) : authMode === 'login' ? (
+                    'Authenticate clinician'
+                  ) : (
+                    'Instantiate profile'
+                  )}
+                </button>
+              </form>
+
+              {/* Toggle Login/Signup Modes */}
+              <div className="mt-5 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode(authMode === 'login' ? 'register' : 'login');
+                    setAuthError(null);
+                    setAuthSuccessMessage(null);
+                  }}
+                  className="text-[10px] font-mono text-zinc-500 hover:text-emerald-400 uppercase tracking-wider transition-colors inline-block"
+                >
+                  {authMode === 'login' 
+                    ? "New Operator? Instantiate free profile" 
+                    : "Back to Clinician credentials sign in"}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
