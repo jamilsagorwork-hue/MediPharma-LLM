@@ -462,7 +462,7 @@ async function startServer() {
   });
 }
 
-if (!process.env.VERCEL) {
+if (!process.env.VERCEL && !process.env.IS_SERVERLESS_API) {
   startServer();
 }
 
