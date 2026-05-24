@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { CLINICAL_DOSING_DATABASE } from "./src/data/medicineData";
@@ -16,12 +15,23 @@ const PORT = 3000;
 let supabaseClientCache: any = null;
 function getSupabase() {
   if (!supabaseClientCache) {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+    const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+    const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
     if (supabaseUrl && supabaseAnonKey) {
       try {
-        supabaseClientCache = createClient(supabaseUrl, supabaseAnonKey);
-        console.log("[Supabase Server] Connected securely using server keys.");
+        let cleanUrl = supabaseUrl.trim();
+        // Strip trailing postgrest path segments if present
+        if (cleanUrl.endsWith("/rest/v1/")) {
+          cleanUrl = cleanUrl.slice(0, -9);
+        } else if (cleanUrl.endsWith("/rest/v1")) {
+          cleanUrl = cleanUrl.slice(0, -8);
+        }
+        // General training slash cleanup
+        if (cleanUrl.endsWith("/")) {
+          cleanUrl = cleanUrl.slice(0, -1);
+        }
+        supabaseClientCache = createClient(cleanUrl, supabaseAnonKey.trim());
+        console.log("[Supabase Server] Connected securely using cleaned URL:", cleanUrl);
       } catch (err) {
         console.error("[Supabase Server] Failed to initialize client:", err);
       }
@@ -429,11 +439,16 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // Configure Vite middleware in development or serve static build in production
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
+    try {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch (importErr) {
+      console.error("[Server] Dev server failed to lazy-load Vite. If compiling for production, this warning is expected.", importErr);
+    }
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
