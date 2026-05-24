@@ -2,6 +2,10 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import dotenv from "dotenv";
+
+// Load environment variables from .env file
+dotenv.config();
 
 const app = express();
 const PORT = 3000;
@@ -10,25 +14,86 @@ const PORT = 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// Initialize Gemini Client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
+// Lazy initializer for Gemini Client to prevent crash on startup if key is missing
+let aiClient: GoogleGenAI | null = null;
+
+function getGeminiClient(): GoogleGenAI {
+  if (!aiClient) {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      throw new Error("GEMINI_API_KEY environment variable is not configured on the server. Please add it to your secrets or environment variables.");
+    }
+    aiClient = new GoogleGenAI({
+      apiKey: key,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return aiClient;
+}
+
+/**
+ * Executes a Gemini API call with automatic retries for transient errors (e.g. 503 UNAVAILABLE, 429 rate limit).
+ * Utilizes exponential backoff to handle temporary Service Unavailable states gracefully.
+ */
+async function generateContentWithRetry(
+  params: {
+    model?: string;
+    contents: any;
+    config?: any;
   },
-});
+  maxRetries = 2,
+  initialDelayMs = 2000
+) {
+  const modelName = params.model || "gemini-3.5-flash";
+  let delayMs = initialDelayMs;
+
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const ai = getGeminiClient();
+      return await ai.models.generateContent({
+        ...params,
+        model: modelName,
+      });
+    } catch (error: any) {
+      console.warn(`[Gemini API Attempt ${attempt} / ${maxRetries + 1} failed]:`, error?.message || error);
+      
+      const errorStr = String(error?.message || error || "").toUpperCase();
+      const isTransient = 
+        errorStr.includes("503") || 
+        errorStr.includes("UNAVAILABLE") ||
+        errorStr.includes("LIMIT") || 
+        errorStr.includes("429") ||
+        error?.status === 503 ||
+        error?.status === 429;
+
+      if (!isTransient || attempt > maxRetries) {
+        throw error;
+      }
+
+      console.log(`Retrying in ${delayMs}ms due to transient error...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      delayMs *= 1.5; // exponential backoff
+    }
+  }
+  throw new Error("Content generation failed after retries.");
+}
 
 // Backend API Routes
-app.post("/api/pharma/identify", async (req, res) => {
+app.post("/api/pharma/identify", async (req, res, next) => {
   try {
-    const { base64Image } = req.body;
-    if (!base64Image) {
-      return res.status(400).json({ error: "No image payload found in request." });
+    const { base64Image, textDescription } = req.body;
+    if (!base64Image && !textDescription) {
+      return res.status(400).json({ error: "Either a visual image payload or a text description must be supplied." });
     }
 
-    const prompt = `Identify this medicine from the image. Provide the following details in a structured, beautifully aligned markdown format:
+    let response;
+
+    if (base64Image) {
+      const prompt = `Identify this medicine from the image. Provide the following details in a structured, beautifully aligned markdown format:
 
 1. **Medicine Name** (Brand and Generic)
 2. **Medical Conditions Treated (Why This Medicine is Used)**
@@ -47,27 +112,57 @@ app.post("/api/pharma/identify", async (req, res) => {
 
 **IMPORTANT DISCLAIMER**: Always add a highly visible disclaimer at the beginning or end stating that this is AI-generated informational content and not a substitute for professional medical/clinical advice, diagnosis, or treatment.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: {
-        parts: [
-          { inlineData: { mimeType: "image/jpeg", data: base64Image } },
-          { text: prompt },
-        ],
-      },
-      config: {
-        temperature: 0.1,
-      },
-    });
+      response = await generateContentWithRetry({
+        model: "gemini-3.5-flash",
+        contents: {
+          parts: [
+            { inlineData: { mimeType: "image/jpeg", data: base64Image } },
+            { text: prompt },
+          ],
+        },
+        config: {
+          temperature: 0.1,
+        },
+      });
+    } else {
+      const prompt = `Identify this medicine based on the following physical description or characteristics provided by the user: "${textDescription}". 
+Analyze the physical traits (such as shape, color, imprint codes, division line, or name) to determine the candidate medicine(s). 
+Provide the following details in a structured, beautifully aligned markdown format:
+
+1. **Identified Medicine Candidate(s)** (Brand, Generic names, and standard strengths)
+2. **Medical Conditions Treated (Why This Medicine is Used)**
+   - Exhaustive explanation of what diseases, symptoms, or health conditions this medicine is used for.
+3. **Age-Specific Dosage Information**
+   - Provide recommended standard dosages with clear, specific guidelines for the following age cohorts:
+     * **Infants & Toddlers (under 2 years)**
+     * **Children (2 - 12 years)**
+     * **Teens & Adults (13 - 64 years)**
+     * **Elderly (65+ years)**
+4. **Treatment Duration (How many days needed)**
+   - Clearly describe how many days this medicine needs to be taken for each different condition/disease it treats. State any factors affecting duration.
+5. **Brand Alternatives** (Other common brands with exactly the same chemical composition/generic formulation)
+6. **Chemical Compounds** (Active chemical ingredients)
+7. **Precautions & Warnings** (Contraindications, warnings about self-medication, storage requirements)
+
+**IMPORTANT DISCLAIMER**: Always add a highly visible disclaimer at the beginning or end stating that this is AI-generated informational content and not a substitute for professional medical/clinical advice, diagnosis, or treatment.`;
+
+      response = await generateContentWithRetry({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+        config: {
+          temperature: 0.2,
+        },
+      });
+    }
 
     res.json({ result: response.text || "Could not identify medicine." });
   } catch (error: any) {
     console.error("Error identifying medicine:", error);
-    res.status(500).json({ error: error.message || "Failed to analyze image." });
+    res.status(500).json({ error: error.message || "Failed to analyze medicine." });
   }
 });
 
-app.post("/api/pharma/disease", async (req, res) => {
+app.post("/api/pharma/disease", async (req, res, next) => {
   try {
     const { query } = req.body;
     if (!query) {
@@ -91,7 +186,7 @@ app.post("/api/pharma/disease", async (req, res) => {
 
 **IMPORTANT DISCLAIMER**: Always add a highly visible disclaimer at the beginning or end stating that this is AI-generated informational content and not a substitute for professional medical/clinical advice, diagnosis, or treatment.`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithRetry({
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {
@@ -106,7 +201,7 @@ app.post("/api/pharma/disease", async (req, res) => {
   }
 });
 
-app.post("/api/pharma/alternatives", async (req, res) => {
+app.post("/api/pharma/alternatives", async (req, res, next) => {
   try {
     const { query } = req.body;
     if (!query) {
@@ -127,7 +222,7 @@ app.post("/api/pharma/alternatives", async (req, res) => {
 
 **IMPORTANT DISCLAIMER**: Always add a highly visible disclaimer at the beginning or end stating that this is AI-generated informational content and not a substitute for professional medical/clinical advice, diagnosis, or treatment.`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithRetry({
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {
@@ -140,6 +235,12 @@ app.post("/api/pharma/alternatives", async (req, res) => {
     console.error("Error fetching alternatives:", error);
     res.status(500).json({ error: error.message || "Search failed." });
   }
+});
+
+// Error handling middleware to catch unhandled errors and return JSON instead of HTML
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("Express Global Error Handler caught:", err);
+  res.status(500).json({ error: err?.message || "An unexpected system error occurred on the server." });
 });
 
 // Configure Vite middleware in development or serve static build in production

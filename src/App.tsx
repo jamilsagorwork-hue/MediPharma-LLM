@@ -18,7 +18,8 @@ import {
   History,
   Trash2,
   Clock,
-  ExternalLink
+  ExternalLink,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -44,6 +45,8 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   
   const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [identifySubMode, setIdentifySubMode] = useState<'visual' | 'text'>('visual');
+  const [textDescription, setTextDescription] = useState('');
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -177,6 +180,25 @@ export default function App() {
     }
   };
 
+  const processTextDescription = async () => {
+    if (!textDescription.trim()) return;
+    setLoading(true);
+    setResult(null);
+    setError(null);
+    try {
+      const data = await identifyMedicine(undefined, textDescription);
+      if (data) {
+        addToHistory('identify', `Physical Profile: "${textDescription.substring(0, 30)}..."`, data);
+      }
+      setResult(data || 'Could not identify medicine.');
+    } catch (err) {
+      console.error(err);
+      setError('Failed to analyze description. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSearch = async () => {
     if (!query.trim()) return;
     setLoading(true);
@@ -207,6 +229,7 @@ export default function App() {
     setPreview(null);
     setQuery('');
     setError(null);
+    setTextDescription('');
   };
 
   return (
@@ -360,15 +383,15 @@ export default function App() {
               </div>
             ) : mode === 'identify' ? (
               <div 
-                className={`relative bg-[#0f0f0f] border rounded-3xl transition-all h-[380px] sm:h-[450px] flex flex-col items-center justify-center overflow-hidden group ${
-                  preview || isCameraOpen ? 'border-blue-500/30 shadow-[0_0_40px_rgba(59,130,246,0.05)]' : 'border-white/5 hover:border-white/10'
+                className={`relative bg-[#0f0f0f] border rounded-3xl transition-all flex flex-col items-center justify-center overflow-hidden group p-6 sm:p-12 ${
+                  preview || isCameraOpen ? 'h-[380px] sm:h-[450px] border-blue-500/30 shadow-[0_0_40px_rgba(59,130,246,0.05)]' : 'min-h-[380px] sm:min-h-[450px] border-white/5 hover:border-white/10'
                 }`}
               >
                 {/* Decorative glow */}
                 <div className="absolute top-0 right-0 w-48 sm:w-64 h-48 sm:h-64 bg-blue-500/5 blur-[80px] sm:blur-[100px] rounded-full"></div>
                 
                 {isCameraOpen ? (
-                  <div className="relative w-full h-full z-10 bg-black">
+                  <div className="relative w-full h-full z-10 bg-black rounded-2xl overflow-hidden">
                     <video 
                       ref={videoRef} 
                       autoPlay 
@@ -416,27 +439,102 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  <div className="relative z-10 flex flex-col items-center text-center p-6 sm:p-8">
-                    <div className="w-16 h-16 sm:w-20 sm:h-20 bg-blue-500/10 rounded-3xl flex items-center justify-center border border-blue-500/20 mb-6 sm:mb-8 group-hover:scale-105 transition-transform duration-500 shadow-[0_0_30px_rgba(59,130,246,0.1)]">
-                      <Camera className="w-6 h-6 sm:w-8 sm:h-8 text-blue-500" />
-                    </div>
-                    <h3 className="text-white text-lg sm:text-xl font-medium font-serif italic mb-2">Awaiting Input...</h3>
-                    <p className="text-zinc-500 text-[10px] sm:text-sm mb-6 sm:mb-8 tracking-tight uppercase font-bold max-w-[200px] sm:max-w-xs">Upload therapeutic image for molecular identification</p>
-                    <div className="flex flex-col gap-3 min-w-[200px]">
-                      <button 
-                        onClick={startCamera}
-                        className="w-full sm:w-auto px-6 sm:px-8 py-3.5 sm:py-4 bg-blue-500 hover:bg-blue-400 text-black text-[10px] sm:text-xs font-bold rounded-full transition-all uppercase tracking-[0.2em] shadow-[0_10px_30px_rgba(59,130,246,0.2)] flex items-center justify-center gap-2"
+                  <div className="relative z-10 w-full flex flex-col items-center">
+                    {/* Modern mode selector tabs inside the interactive zone */}
+                    <div className="flex bg-[#121212] border border-white/5 rounded-full p-1 w-full max-w-sm mb-8 relative z-20">
+                      <button
+                        onClick={() => setIdentifySubMode('visual')}
+                        className={`flex-1 py-2 rounded-full text-[9px] sm:text-[10px] font-bold tracking-widest uppercase transition-all flex items-center justify-center gap-2 ${
+                          identifySubMode === 'visual' ? 'bg-blue-500 text-black font-extrabold shadow-[0_0_15px_rgba(59,130,246,0.2)]' : 'text-zinc-500 hover:text-zinc-300'
+                        }`}
                       >
-                        <Camera className="w-4 h-4" />
-                        Open Scanner
+                        <Camera className="w-3.5 h-3.5" />
+                        Visual
                       </button>
-                      <button 
-                        onClick={() => fileInputRef.current?.click()}
-                        className="w-full sm:w-auto px-6 sm:px-8 py-3.5 sm:py-4 bg-white/5 hover:bg-white/10 text-white border border-white/10 text-[10px] sm:text-xs font-bold rounded-full transition-all uppercase tracking-[0.2em]"
+                      <button
+                        onClick={() => setIdentifySubMode('text')}
+                        className={`flex-1 py-2 rounded-full text-[9px] sm:text-[10px] font-bold tracking-widest uppercase transition-all flex items-center justify-center gap-2 ${
+                          identifySubMode === 'text' ? 'bg-blue-500 text-black font-extrabold shadow-[0_0_15px_rgba(59,130,246,0.2)]' : 'text-zinc-500 hover:text-zinc-300'
+                        }`}
                       >
-                        Upload Local File
+                        <Sparkles className="w-3.5 h-3.5" />
+                        Traits text
                       </button>
                     </div>
+
+                    {identifySubMode === 'visual' ? (
+                      <div className="flex flex-col items-center text-center">
+                        <div className="w-16 h-16 sm:w-20 sm:h-20 bg-blue-500/10 rounded-3xl flex items-center justify-center border border-blue-500/20 mb-6 sm:mb-8 group-hover:scale-105 transition-transform duration-500 shadow-[0_0_30px_rgba(59,130,246,0.1)]">
+                          <Camera className="w-6 h-6 sm:w-8 sm:h-8 text-blue-500" />
+                        </div>
+                        <h3 className="text-white text-lg sm:text-xl font-medium font-serif italic mb-2">Awaiting Input...</h3>
+                        <p className="text-zinc-500 text-[10px] sm:text-sm mb-6 sm:mb-8 tracking-tight uppercase font-bold max-w-[200px] sm:max-w-xs">Upload therapeutic image for molecular identification</p>
+                        <div className="flex flex-col gap-3 min-w-[200px]">
+                          <button 
+                            onClick={startCamera}
+                            className="w-full sm:w-auto px-6 sm:px-8 py-3.5 sm:py-4 bg-blue-500 hover:bg-blue-400 text-black text-[10px] sm:text-xs font-bold rounded-full transition-all uppercase tracking-[0.2em] shadow-[0_10px_30px_rgba(59,130,246,0.2)] flex items-center justify-center gap-2"
+                          >
+                            <Camera className="w-4 h-4" />
+                            Open Scanner
+                          </button>
+                          <button 
+                            onClick={() => fileInputRef.current?.click()}
+                            className="w-full sm:w-auto px-6 sm:px-8 py-3.5 sm:py-4 bg-white/5 hover:bg-white/10 text-white border border-white/10 text-[10px] sm:text-xs font-bold rounded-full transition-all uppercase tracking-[0.2em]"
+                          >
+                            Upload Local File
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="w-full max-w-2xl flex flex-col items-center">
+                        <div className="w-16 h-16 sm:w-20 sm:h-20 bg-blue-500/10 rounded-3xl flex items-center justify-center border border-blue-500/20 mb-6 sm:mb-8 group-hover:scale-105 transition-transform duration-500 shadow-[0_0_30px_rgba(59,130,246,0.1)]">
+                          <Sparkles className="w-6 h-6 sm:w-8 sm:h-8 text-blue-500" />
+                        </div>
+                        <h3 className="text-white text-lg sm:text-xl font-medium font-serif italic mb-2">Describe Your Asset</h3>
+                        <p className="text-zinc-500 text-[10px] sm:text-sm mb-6 tracking-tight uppercase font-bold max-w-sm text-center">Describe the pill imprint, color, shape, or marks</p>
+                        
+                        <div className="w-full relative rounded-2xl border border-white/5 bg-white/2 backdrop-blur-sm overflow-hidden mb-6 hover:border-white/10 transition-colors">
+                          <textarea
+                            value={textDescription}
+                            onChange={(e) => setTextDescription(e.target.value)}
+                            placeholder="E.g., round peach/orange tablet with imprint IG 282 on one side OR oblong white tablet marked L484..."
+                            className="w-full min-h-[110px] p-4 bg-transparent text-white text-sm focus:ring-0 outline-none placeholder:text-zinc-700 resize-none font-light leading-relaxed font-sans"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey && textDescription.trim()) {
+                                e.preventDefault();
+                                processTextDescription();
+                              }
+                            }}
+                          />
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 justify-center mb-8 max-w-md">
+                          <span className="text-[9px] text-zinc-500 uppercase tracking-widest my-auto mr-1 font-bold">Presets:</span>
+                          {[
+                            "Round peach tablet IG 282", 
+                            "Oblong yellow with L484", 
+                            "IP 204 white capsule"
+                          ].map((preset) => (
+                            <button
+                              key={preset}
+                              onClick={() => setTextDescription(preset)}
+                              className="px-3 py-1 bg-white/5 hover:bg-white/10 hover:border-blue-500/30 text-zinc-400 hover:text-white border border-white/5 rounded-full text-[10px] transition-all"
+                            >
+                              {preset}
+                            </button>
+                          ))}
+                        </div>
+
+                        <button 
+                          onClick={processTextDescription}
+                          disabled={loading || !textDescription.trim()}
+                          className="w-full sm:w-auto px-10 py-3.5 sm:py-4 bg-blue-500 hover:bg-blue-400 disabled:bg-zinc-800 disabled:text-zinc-650 text-black text-[10px] sm:text-xs font-bold rounded-full transition-all uppercase tracking-[0.2em] shadow-[0_10px_30px_rgba(59,130,246,0.2)] flex items-center justify-center gap-2"
+                        >
+                          <Search className="w-4 h-4" />
+                          Examine Traits
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
                 <input 
